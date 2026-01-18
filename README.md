@@ -1,0 +1,70 @@
+# Heisen-XP Bot (discord.js v14)
+# MIT LICENSE
+
+Per-guild configurable XP/level bot that tracks:
+- **Messages**
+- **Reactions**
+- **Voice minutes** (per-minute ticker; ignores muted/deafened users and alone-in-channel idling)
+
+Includes:
+- Per-guild settings stored in **SQLite** (zero-setup for self-hosting)
+- Tunable **decay** (daily cron)
+- **Level → Role** automation with **drop-below grace days**
+- **Command restriction** to allowed channels per guild
+- Admin/mod commands for configuration
+
+## Setup
+
+1) Install dependencies
+```bash
+npm install
+```
+
+2) Create `.env`
+```bash
+cp .env.example .env
+# edit .env
+```
+
+3) Register slash commands
+- **Production (multi-guild):** register global commands (default). Note: global command updates can take time to propagate.
+- **Development (fast):** set `DEV_GUILD_ID` in `.env` to register instantly to one guild.
+
+```bash
+npm run register
+```
+
+4) Run bot
+```bash
+npm start
+```
+
+## Required Discord Developer Portal settings
+
+- Enable the **Message Content Intent** if you want `messageCreate` to fire reliably for all message events.
+  - Without it, the bot may not receive message content and (depending on gateway/intents configuration) may not receive message events as expected.
+
+## Commands
+
+User commands:
+- `/xp [user]`
+- `/leaderboard [limit]`
+
+Admin/mod commands (requires **Manage Guild** by default):
+- `/setxp message:<int> reaction:<int> voice:<int> msgcooldown:<int> reactioncooldown:<int>`
+- `/setdecay enabled:<bool> messages:<int> days:<int> percent:<0-95>`
+- `/leveltorole set role:<role> level:<int> dropdays:<int>`
+- `/leveltorole remove role:<role>`
+- `/leveltorole list`
+- `/setcommandchannel add channel:<channel>`
+- `/setcommandchannel remove channel:<channel>`
+- `/setcommandchannel list`
+- `/settings` (shows current guild settings, role mappings, allowed channels)
+
+## Notes
+
+- Bot must have **Manage Roles** permission and its highest role must be **above** roles it manages.
+- Voice XP is awarded once per minute for **eligible** users:
+  - not muted/deafened (self or server)
+  - and in a voice channel with **at least 2 eligible human users**
+- SQLite DB file (`xpbot.sqlite`) is created automatically in the project root.
