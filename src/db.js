@@ -1,9 +1,45 @@
+// src/db.js
 const Database = require("better-sqlite3");
 const path = require("path");
 
 const db = new Database(path.join(__dirname, "..", "xpbot.sqlite"));
 db.pragma("journal_mode = WAL");
 
+function now() {
+  return Date.now();
+}
+
+/**
+ * Helper: check if a table exists.
+ */
+function tableExists(name) {
+  const row = db
+  .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`)
+  .get(name);
+  return !!row;
+}
+
+/**
+ * Helper: get columns for a table (empty if table doesn't exist)
+ */
+function getColumns(table) {
+  if (!tableExists(table)) return [];
+  return db.prepare(`PRAGMA table_info(${table})`).all().map(r => r.name);
+}
+
+/**
+ * Helper: add column if missing (SQLite doesn't support IF NOT EXISTS for columns).
+ */
+function addColumnIfMissing(table, columnName, columnDefSql) {
+  const cols = new Set(getColumns(table));
+  if (cols.has(columnName)) return;
+  db.prepare(`ALTER TABLE ${table} ADD COLUMN ${columnDefSql}`).run();
+}
+
+/**
+ * Base schema creation.
+ * Note: if you change schema later, add migration logic below.
+ */
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   guild_id TEXT NOT NULL,
@@ -24,14 +60,22 @@ CREATE TABLE IF NOT EXISTS activity_log (
 CREATE INDEX IF NOT EXISTS idx_activity_recent
 ON activity_log (guild_id, user_id, kind, created_at);
 
+-- Kept for compatibility / future features
+CREATE TABLE IF NOT EXISTS voice_sessions (
+  guild_id TEXT NOT NULL,
+  user_id  TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (guild_id, user_id)
+);
+
 -- Per-guild settings (one row per guild)
 CREATE TABLE IF NOT EXISTS guild_settings (
   guild_id TEXT PRIMARY KEY,
+
   msg_xp INTEGER NOT NULL DEFAULT 5,
-  reaction_xp INTEGER NOT NULL DEFAULT 2,
   voice_xp_per_min INTEGER NOT NULL DEFAULT 1,
   msg_cooldown_sec INTEGER NOT NULL DEFAULT 20,
-  reaction_cooldown_sec INTEGER NOT NULL DEFAULT 10,
 
   decay_enabled INTEGER NOT NULL DEFAULT 1,
   decay_window_days INTEGER NOT NULL DEFAULT 7,
@@ -39,6 +83,7 @@ CREATE TABLE IF NOT EXISTS guild_settings (
   decay_percent REAL NOT NULL DEFAULT 0.10,
 
   level_xp_factor INTEGER NOT NULL DEFAULT 100,
+
   updated_at INTEGER NOT NULL
 );
 
@@ -53,7 +98,7 @@ CREATE TABLE IF NOT EXISTS level_roles (
   PRIMARY KEY (guild_id, role_id)
 );
 
--- Tracks when user first fell below a role's required level (to enforce "more than X days")
+-- Tracks when user first fell below a role's required level
 CREATE TABLE IF NOT EXISTS role_drop_state (
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
@@ -72,22 +117,59 @@ CREATE TABLE IF NOT EXISTS allowed_command_channels (
 );
 `);
 
-function now() {
-  return Date.now();
-}
+/**
+ * === MIGRATIONS ===
+ * Add new columns safely for existing installs.
+ */
+(function runMigrations() {
+  // Add per-guild reaction XP + cooldown (new feature)
+  addColumnIfMissing(
+    "guild_settings",
+    "reaction_xp",
+    "reaction_xp INTEGER NOT NULL DEFAULT 2"
+  );
+  addColumnIfMissing(
+    "guild_settings",
+    "reaction_cooldown_sec",
+    "reaction_cooldown_sec INTEGER NOT NULL DEFAULT 10"
+  );
+})();
 
+/**
+ * Ensure a settings row exists for a guild.
+ * This also ensures defaults are present for all columns (including migrated ones).
+ */
 function ensureGuildSettings(guildId) {
-  db.prepare(
-    `INSERT INTO guild_settings (guild_id, updated_at)
-     VALUES (?, ?)
-     ON CONFLICT(guild_id) DO UPDATE SET updated_at=excluded.updated_at`
-  ).run(guildId, now());
+  const t = now();
+  db.prepare(`
+  INSERT INTO guild_settings (guild_id, updated_at)
+  VALUES (?, ?)
+  ON CONFLICT(guild_id) DO UPDATE SET updated_at=excluded.updated_at
+  `).run(guildId, t);
 }
 
 function getGuildSettings(guildId) {
   ensureGuildSettings(guildId);
-  // Guaranteed to exist after ensureGuildSettings
-  return db.prepare(`SELECT * FROM guild_settings WHERE guild_id=?`).get(guildId);
+  const row = db.prepare(`SELECT * FROM guild_settings WHERE guild_id=?`).get(guildId);
+
+  // This should never be undefined due to ensureGuildSettings, but be defensive.
+  if (!row) {
+    return {
+      guild_id: guildId,
+      msg_xp: 5,
+      reaction_xp: 2,
+      voice_xp_per_min: 1,
+      msg_cooldown_sec: 20,
+      reaction_cooldown_sec: 10,
+      decay_enabled: 1,
+      decay_window_days: 7,
+      decay_min_messages: 20,
+      decay_percent: 0.10,
+      level_xp_factor: 100,
+      updated_at: now(),
+    };
+  }
+  return row;
 }
 
 function updateGuildSettings(guildId, patch) {
@@ -106,55 +188,58 @@ function updateGuildSettings(guildId, patch) {
     "level_xp_factor",
   ]);
 
-  const keys = Object.keys(patch).filter((k) => allowed.has(k));
+  const keys = Object.keys(patch).filter(k => allowed.has(k));
   if (!keys.length) return getGuildSettings(guildId);
 
-  const sets = keys.map((k) => `${k}=@${k}`).join(", ");
-  db.prepare(
-    `UPDATE guild_settings
-     SET ${sets}, updated_at=@updated_at
-     WHERE guild_id=@guild_id`
-  ).run({ guild_id: guildId, updated_at: now(), ...patch });
+  const sets = keys.map(k => `${k}=@${k}`).join(", ");
+  db.prepare(`
+  UPDATE guild_settings
+  SET ${sets}, updated_at=@updated_at
+  WHERE guild_id=@guild_id
+  `).run({ guild_id: guildId, updated_at: now(), ...patch });
 
   return getGuildSettings(guildId);
 }
 
+/**
+ * Users / XP
+ */
 function ensureUser(guildId, userId) {
   const t = now();
-  db.prepare(
-    `INSERT INTO users (guild_id, user_id, xp, created_at, updated_at)
-     VALUES (?, ?, 0, ?, ?)
-     ON CONFLICT(guild_id, user_id) DO UPDATE SET updated_at=excluded.updated_at`
-  ).run(guildId, userId, t, t);
+  db.prepare(`
+  INSERT INTO users (guild_id, user_id, xp, created_at, updated_at)
+  VALUES (?, ?, 0, ?, ?)
+  ON CONFLICT(guild_id, user_id) DO UPDATE SET updated_at=excluded.updated_at
+  `).run(guildId, userId, t, t);
 }
 
 /**
- * Atomically add XP.
- * This avoids lost updates under concurrent events because XP increments happen in SQL.
+ * Atomic XP update (prevents lost updates on concurrent events).
+ * Returns the new XP.
  */
 function addXp(guildId, userId, delta) {
   ensureUser(guildId, userId);
   const t = now();
 
   // Atomic update; clamp at 0
-  db.prepare(
-    `UPDATE users
-     SET xp = MAX(0, xp + ?),
-         updated_at = ?
-     WHERE guild_id = ? AND user_id = ?`
-  ).run(delta, t, guildId, userId);
+  db.prepare(`
+  UPDATE users
+  SET xp = MAX(0, xp + ?),
+             updated_at = ?
+             WHERE guild_id=? AND user_id=?
+             `).run(delta, t, guildId, userId);
 
-  const row = db.prepare(`SELECT xp FROM users WHERE guild_id=? AND user_id=?`).get(guildId, userId);
-  return row?.xp ?? 0;
+             const row = db.prepare(`SELECT xp FROM users WHERE guild_id=? AND user_id=?`).get(guildId, userId);
+             return row?.xp ?? 0;
 }
 
 function setXp(guildId, userId, xp) {
   ensureUser(guildId, userId);
-  db.prepare(
-    `UPDATE users
-     SET xp=?, updated_at=?
-     WHERE guild_id=? AND user_id=?`
-  ).run(Math.max(0, Math.floor(xp)), now(), guildId, userId);
+  db.prepare(`
+  UPDATE users
+  SET xp=?, updated_at=?
+  WHERE guild_id=? AND user_id=?
+  `).run(Math.max(0, Math.floor(xp)), now(), guildId, userId);
 }
 
 function getXp(guildId, userId) {
@@ -163,49 +248,79 @@ function getXp(guildId, userId) {
 }
 
 function topUsers(guildId, limit = 10) {
-  return db.prepare(
-    `SELECT user_id, xp
-     FROM users
-     WHERE guild_id=?
-     ORDER BY xp DESC
-     LIMIT ?`
-  ).all(guildId, limit);
+  return db.prepare(`
+  SELECT user_id, xp
+  FROM users
+  WHERE guild_id=?
+  ORDER BY xp DESC
+  LIMIT ?
+  `).all(guildId, limit);
 }
 
+function allUsersInGuild(guildId) {
+  return db.prepare(`
+  SELECT user_id, xp
+  FROM users
+  WHERE guild_id=?
+  `).all(guildId);
+}
+
+/**
+ * Activity log
+ */
 function logActivity(guildId, userId, kind, amount = 1) {
-  db.prepare(
-    `INSERT INTO activity_log (guild_id, user_id, kind, amount, created_at)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(guildId, userId, kind, amount, now());
+  db.prepare(`
+  INSERT INTO activity_log (guild_id, user_id, kind, amount, created_at)
+  VALUES (?, ?, ?, ?, ?)
+  `).run(guildId, userId, kind, amount, now());
 }
 
 function countMessagesInWindow(guildId, userId, windowDays) {
   const since = now() - windowDays * 24 * 60 * 60 * 1000;
-  const row = db
-    .prepare(
-      `SELECT COALESCE(SUM(amount), 0) AS c
-       FROM activity_log
-       WHERE guild_id=? AND user_id=? AND kind='message' AND created_at >= ?`
-    )
-    .get(guildId, userId, since);
+  const row = db.prepare(`
+  SELECT COALESCE(SUM(amount), 0) AS c
+  FROM activity_log
+  WHERE guild_id=? AND user_id=? AND kind='message' AND created_at >= ?
+  `).get(guildId, userId, since);
   return row?.c ?? 0;
 }
 
-function allUsersInGuild(guildId) {
-  return db.prepare(`SELECT user_id, xp FROM users WHERE guild_id=?`).all(guildId);
+/**
+ * Voice sessions (kept for compatibility / future)
+ */
+function upsertVoiceSession(guildId, userId, channelId, joinedAtMs) {
+  db.prepare(`
+  INSERT INTO voice_sessions (guild_id, user_id, channel_id, joined_at)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(guild_id, user_id) DO UPDATE SET channel_id=excluded.channel_id, joined_at=excluded.joined_at
+  `).run(guildId, userId, channelId, joinedAtMs);
 }
 
-// Level roles
+function getVoiceSession(guildId, userId) {
+  return db.prepare(`
+  SELECT guild_id, user_id, channel_id, joined_at
+  FROM voice_sessions
+  WHERE guild_id=? AND user_id=?
+  `).get(guildId, userId);
+}
+
+function deleteVoiceSession(guildId, userId) {
+  db.prepare(`DELETE FROM voice_sessions WHERE guild_id=? AND user_id=?`).run(guildId, userId);
+}
+
+/**
+ * Level roles
+ */
 function upsertLevelRole(guildId, roleId, levelRequired, dropGraceDays) {
   const t = now();
-  db.prepare(
-    `INSERT INTO level_roles (guild_id, role_id, level_required, drop_grace_days, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(guild_id, role_id) DO UPDATE SET
-       level_required=excluded.level_required,
-       drop_grace_days=excluded.drop_grace_days,
-       updated_at=excluded.updated_at`
-  ).run(guildId, roleId, levelRequired, dropGraceDays, t, t);
+  db.prepare(`
+  INSERT INTO level_roles (guild_id, role_id, level_required, drop_grace_days, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(guild_id, role_id) DO UPDATE SET
+  level_required=excluded.level_required,
+  drop_grace_days=excluded.drop_grace_days,
+  updated_at=excluded.updated_at
+  `).run(guildId, roleId, levelRequired, dropGraceDays, t, t);
 }
 
 function deleteLevelRole(guildId, roleId) {
@@ -214,83 +329,94 @@ function deleteLevelRole(guildId, roleId) {
 }
 
 function listLevelRoles(guildId) {
-  return db
-    .prepare(
-      `SELECT role_id, level_required, drop_grace_days
-       FROM level_roles
-       WHERE guild_id=?
-       ORDER BY level_required ASC`
-    )
-    .all(guildId);
+  return db.prepare(`
+  SELECT role_id, level_required, drop_grace_days
+  FROM level_roles
+  WHERE guild_id=?
+  ORDER BY level_required ASC
+  `).all(guildId);
 }
 
-// Role drop state
+/**
+ * Role drop state
+ */
 function getRoleDropState(guildId, userId, roleId) {
-  return db
-    .prepare(
-      `SELECT below_since
-       FROM role_drop_state
-       WHERE guild_id=? AND user_id=? AND role_id=?`
-    )
-    .get(guildId, userId, roleId);
+  return db.prepare(`
+  SELECT below_since
+  FROM role_drop_state
+  WHERE guild_id=? AND user_id=? AND role_id=?
+  `).get(guildId, userId, roleId);
 }
 
 function setRoleBelowSince(guildId, userId, roleId, belowSinceOrNull) {
   const t = now();
-  db.prepare(
-    `INSERT INTO role_drop_state (guild_id, user_id, role_id, below_since, updated_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(guild_id, user_id, role_id) DO UPDATE SET
-       below_since=excluded.below_since,
-       updated_at=excluded.updated_at`
-  ).run(guildId, userId, roleId, belowSinceOrNull, t);
+  db.prepare(`
+  INSERT INTO role_drop_state (guild_id, user_id, role_id, below_since, updated_at)
+  VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(guild_id, user_id, role_id) DO UPDATE SET
+  below_since=excluded.below_since,
+  updated_at=excluded.updated_at
+  `).run(guildId, userId, roleId, belowSinceOrNull, t);
 }
 
-// Allowed command channels
+/**
+ * Allowed command channels
+ */
 function addAllowedCommandChannel(guildId, channelId) {
-  db.prepare(
-    `INSERT OR IGNORE INTO allowed_command_channels (guild_id, channel_id, created_at)
-     VALUES (?, ?, ?)`
-  ).run(guildId, channelId, now());
+  db.prepare(`
+  INSERT OR IGNORE INTO allowed_command_channels (guild_id, channel_id, created_at)
+  VALUES (?, ?, ?)
+  `).run(guildId, channelId, now());
 }
 
 function removeAllowedCommandChannel(guildId, channelId) {
-  db.prepare(`DELETE FROM allowed_command_channels WHERE guild_id=? AND channel_id=?`).run(guildId, channelId);
+  db.prepare(`
+  DELETE FROM allowed_command_channels
+  WHERE guild_id=? AND channel_id=?
+  `).run(guildId, channelId);
 }
 
 function listAllowedCommandChannels(guildId) {
-  return db
-    .prepare(
-      `SELECT channel_id
-       FROM allowed_command_channels
-       WHERE guild_id=?
-       ORDER BY created_at ASC`
-    )
-    .all(guildId);
+  return db.prepare(`
+  SELECT channel_id
+  FROM allowed_command_channels
+  WHERE guild_id=?
+  ORDER BY created_at ASC
+  `).all(guildId);
 }
 
 module.exports = {
   db,
   now,
+
   // guild settings
   getGuildSettings,
   updateGuildSettings,
+
   // users/xp
   addXp,
   setXp,
   getXp,
   topUsers,
   allUsersInGuild,
+
   // activity
   logActivity,
   countMessagesInWindow,
-  // level roles
+
+  // voice sessions
+  upsertVoiceSession,
+  getVoiceSession,
+  deleteVoiceSession,
+
+  // roles
   upsertLevelRole,
   deleteLevelRole,
   listLevelRoles,
   getRoleDropState,
   setRoleBelowSince,
-  // allowed channels
+
+  // command channel restriction
   addAllowedCommandChannel,
   removeAllowedCommandChannel,
   listAllowedCommandChannels,
