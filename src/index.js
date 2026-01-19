@@ -20,7 +20,6 @@ const {
   topUsers,
 
   logActivity,
-  countMessagesInWindow,
 
   addAllowedCommandChannel,
   removeAllowedCommandChannel,
@@ -34,6 +33,10 @@ const {
 } = require("./db");
 
 const { renderLeaderboardPng } = require("./renderLeaderboard");
+const { levelFromXp } = require("./xp");
+const { syncMemberRoles } = require("./roles");
+const { startVoiceTicker } = require("./voiceTicker");
+const { startDecayScheduler } = require("./decay");
 
 const MAX_XP_AWARD = 1_000_000_000;
 
@@ -62,11 +65,6 @@ function commandsAllowed(interaction) {
   return rows.some(r => r.channel_id === interaction.channelId);
 }
 
-function levelFromXp(xp, factor) {
-  const f = Math.max(1, Number(factor) || 100);
-  return Math.floor(Math.sqrt(Math.max(0, xp) / f));
-}
-
 function validateXpValue(value, label) {
   if (value === null || value === undefined) return null;
   if (!Number.isFinite(value) || value < 0) {
@@ -78,102 +76,13 @@ function validateXpValue(value, label) {
   return null;
 }
 
-/**
- * Role sync: grant roles when level >= required, remove if below for drop_grace_days.
- * Logs failures instead of swallowing them.
- */
-async function syncUserRolesForMember(member, xp, settings) {
-  if (!member?.guild) return;
-
-  const guildId = member.guild.id;
-  const mappings = listLevelRoles(guildId);
-  if (!mappings.length) return;
-
-  const lvl = levelFromXp(xp, settings.level_xp_factor);
-  const nowMs = Date.now();
-
-  for (const map of mappings) {
-    const roleId = map.role_id;
-    const required = Number(map.level_required) || 0;
-    const graceDays = Math.max(0, Number(map.drop_grace_days) || 0);
-    const graceMs = graceDays * 24 * 60 * 60 * 1000;
-
-    const hasRole = member.roles.cache.has(roleId);
-    const qualifies = lvl >= required;
-
-    if (qualifies) {
-      // Ensure role
-      if (!hasRole) {
-        try {
-          await member.roles.add(roleId, `HeisenXP: reached level ${lvl} (requires ${required})`);
-        } catch (e) {
-          console.error(
-            `[roles] Failed to add role ${roleId} for user ${member.id} in guild ${guildId}:`,
-            e?.message || e
-          );
-          console.error(
-            `[roles] Common cause: bot's highest role is below the role it's trying to manage, or it lacks Manage Roles permission.`
-          );
-        }
-      }
-      // Clear below-since state if present
-      const st = getRoleDropState(guildId, member.id, roleId);
-      if (st?.below_since) {
-        setRoleBelowSince(guildId, member.id, roleId, null);
-      }
-      continue;
-    }
-
-    // Below required:
-    if (!hasRole) {
-      // nothing to remove, clear state
-      const st = getRoleDropState(guildId, member.id, roleId);
-      if (st?.below_since) setRoleBelowSince(guildId, member.id, roleId, null);
-      continue;
-    }
-
-    // Has role but below requirement: start/continue timer
-    const st = getRoleDropState(guildId, member.id, roleId);
-    if (!st || !st.below_since) {
-      setRoleBelowSince(guildId, member.id, roleId, nowMs);
-      continue;
-    }
-
-    if (graceMs === 0 || (nowMs - st.below_since) >= graceMs) {
-      try {
-        await member.roles.remove(roleId, `HeisenXP: below level ${required} for ${graceDays} day(s)`);
-      } catch (e) {
-        console.error(
-          `[roles] Failed to remove role ${roleId} for user ${member.id} in guild ${guildId}:`,
-          e?.message || e
-        );
-        console.error(
-          `[roles] Common cause: bot's highest role is below the role it's trying to manage, or it lacks Manage Roles permission.`
-        );
-      } finally {
-        setRoleBelowSince(guildId, member.id, roleId, null);
-      }
-    }
+// ---------------- Cooldown cleanup ----------------
+// Keep memory bounded for long-running bots. We sweep occasionally.
+function sweepCooldownMap(map, maxAgeMs) {
+  const cutoff = Date.now() - maxAgeMs;
+  for (const [k, ts] of map.entries()) {
+    if (ts < cutoff) map.delete(k);
   }
-}
-
-/**
- * Apply decay to a user if enabled and below activity threshold.
- * Decay rule:
- * If messages in last window < decay_min_messages => reduce XP by decay_percent.
- */
-function maybeApplyDecay(guildId, userId, currentXp, settings) {
-  if (!settings.decay_enabled) return 0;
-
-  const windowDays = Math.max(1, Number(settings.decay_window_days) || 7);
-  const minMsgs = Math.max(0, Number(settings.decay_min_messages) || 0);
-  const pct = Math.max(0, Math.min(0.95, Number(settings.decay_percent) || 0));
-
-  const msgCount = countMessagesInWindow(guildId, userId, windowDays);
-  if (msgCount >= minMsgs) return 0;
-
-  const loss = Math.floor(currentXp * pct);
-  return loss > 0 ? -loss : 0;
 }
 
 const client = new Client({
@@ -190,38 +99,19 @@ const client = new Client({
 client.once(Events.ClientReady, () => {
   console.log(`HeisenXP-Bot logged in as ${client.user.tag}`);
 
-  // Voice ticker: every minute award voice XP to eligible users
-  setInterval(async () => {
-    try {
-      for (const guild of client.guilds.cache.values()) {
-        const settings = getGuildSettings(guild.id);
-        const perMin = Number(settings.voice_xp_per_min) || 0;
-        if (perMin <= 0) continue;
+  // Start the per-minute voice XP ticker.
+  startVoiceTicker(client);
 
-        // Iterate only users in voice
-        for (const vs of guild.voiceStates.cache.values()) {
-          const member = vs.member;
-          const ch = vs.channel;
+  // Start scheduled daily decay (4 AM server local time).
+  startDecayScheduler(client);
 
-          if (!member || !ch) continue;
-          if (member.user.bot) continue;
-
-          // Ignore muted/deafened (self or server)
-          if (vs.selfMute || vs.selfDeaf || vs.serverMute || vs.serverDeaf) continue;
-
-          // Ignore alone-in-channel idling
-          if ((ch.members?.size || 0) <= 1) continue;
-
-          const newXp = addXp(guild.id, member.id, perMin);
-          logActivity(guild.id, member.id, "voice_minute", 1);
-
-          await syncUserRolesForMember(member, newXp, settings);
-        }
-      }
-    } catch (e) {
-      console.error("[voiceTicker] error:", e?.message || e);
-    }
-  }, 60_000);
+  // Periodic cleanup of cooldown maps so memory stays bounded.
+  // We keep a generous window so we don't accidentally delete active entries.
+  setInterval(() => {
+    // 6 hours is plenty for the cooldowns we use (seconds).
+    sweepCooldownMap(msgCooldown, 6 * 60 * 60 * 1000);
+    sweepCooldownMap(reactionCooldown, 6 * 60 * 60 * 1000);
+  }, 10 * 60 * 1000);
 });
 
 // Message XP
@@ -245,12 +135,11 @@ client.on(Events.MessageCreate, async (message) => {
     const newXp = addXp(message.guild.id, message.author.id, gain);
     logActivity(message.guild.id, message.author.id, "message", 1);
 
-    // decay check can be expensive; keep it simple: apply at most once per message cooldown window
-    const decayDelta = maybeApplyDecay(message.guild.id, message.author.id, newXp, settings);
-    const finalXp = decayDelta ? addXp(message.guild.id, message.author.id, decayDelta) : newXp;
-
     const member = await message.guild.members.fetch(message.author.id).catch(() => null);
-    if (member) await syncUserRolesForMember(member, finalXp, settings);
+    if (member) {
+      const lvl = levelFromXp(newXp, settings.level_xp_factor);
+      await syncMemberRoles(member, lvl);
+    }
   } catch (e) {
     console.error("[MessageCreate] error:", e?.message || e);
   }
@@ -287,7 +176,10 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
     logActivity(guild.id, user.id, "reaction", 1);
 
     const member = await guild.members.fetch(user.id).catch(() => null);
-    if (member) await syncUserRolesForMember(member, newXp, settings);
+    if (member) {
+      const lvl = levelFromXp(newXp, settings.level_xp_factor);
+      await syncMemberRoles(member, lvl);
+    }
   } catch (e) {
     console.error("[ReactionAdd] error:", e?.message || e);
   }

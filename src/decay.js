@@ -13,8 +13,12 @@ const DECAY_CRON = "0 4 * * *";
 
 function startDecayScheduler(client) {
   cron.schedule(DECAY_CRON, async () => {
-    for (const guild of client.guilds.cache.values()) {
-      await runDecayForGuild(client, guild.id);
+    try {
+      for (const guild of client.guilds.cache.values()) {
+        await runDecayForGuild(client, guild.id);
+      }
+    } catch (err) {
+      console.error("[decay] scheduler error:", err?.message || err);
     }
   });
 }

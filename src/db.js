@@ -91,6 +91,10 @@ CREATE TABLE IF NOT EXISTS activity_log (
 CREATE INDEX IF NOT EXISTS idx_activity_recent
 ON activity_log (guild_id, user_id, kind, created_at);
 
+-- Helps range scans on time windows (e.g., decay checks, pruning).
+CREATE INDEX IF NOT EXISTS idx_activity_created_at
+ON activity_log (created_at);
+
 -- Kept for compatibility / future features
 CREATE TABLE IF NOT EXISTS voice_sessions (
   guild_id TEXT NOT NULL,
@@ -284,35 +288,53 @@ function ensureUser(guildId, userId) {
  * Returns the new XP.
  */
 function addXp(guildId, userId, delta) {
-  ensureUser(guildId, userId);
-  const t = now();
+  // Transaction ensures read-modify-write operations are atomic.
+  // We also cap the *delta* to avoid overshooting the global XP cap.
+  const tx = db.transaction((gId, uId, d) => {
+    ensureUser(gId, uId);
+    const t = now();
 
-  const safeDelta = clampDelta(delta);
+    const currentRow = db
+      .prepare(`SELECT xp FROM users WHERE guild_id=? AND user_id=?`)
+      .get(gId, uId);
+    const currentXp = clampXpTotal(currentRow?.xp ?? 0);
 
-  // Atomic update; clamp to [0, MAX_SAFE_XP]
-  db.prepare(`
-  UPDATE users
-  SET xp = MIN(?, MAX(0, xp + ?)),
-             updated_at = ?
-             WHERE guild_id=? AND user_id=?
-             `).run(MAX_SAFE_XP, safeDelta, t, guildId, userId);
+    let safeDelta = clampDelta(d);
 
-             const row = db
-             .prepare(`SELECT xp FROM users WHERE guild_id=? AND user_id=?`)
-             .get(guildId, userId);
+    // Cumulative cap: don't allow the *applied* delta to exceed remaining headroom.
+    if (safeDelta > 0) {
+      const headroom = MAX_SAFE_XP - currentXp;
+      safeDelta = Math.min(safeDelta, headroom);
+    } else if (safeDelta < 0) {
+      // Don't underflow below 0.
+      safeDelta = -Math.min(Math.abs(safeDelta), currentXp);
+    }
 
-             const safeXp = clampXpTotal(row?.xp ?? 0);
+    if (safeDelta === 0) return currentXp;
 
-             // If DB had something odd (legacy Infinity etc.), normalize it
-             if (row && row.xp !== safeXp) {
-               db.prepare(`
-               UPDATE users
-               SET xp=?, updated_at=?
-               WHERE guild_id=? AND user_id=?
-               `).run(safeXp, now(), guildId, userId);
-             }
+    db.prepare(`
+      UPDATE users
+      SET xp = MIN(?, MAX(0, xp + ?)),
+          updated_at = ?
+      WHERE guild_id=? AND user_id=?
+    `).run(MAX_SAFE_XP, safeDelta, t, gId, uId);
 
-             return safeXp;
+    const row = db
+      .prepare(`SELECT xp FROM users WHERE guild_id=? AND user_id=?`)
+      .get(gId, uId);
+
+    const safeXp = clampXpTotal(row?.xp ?? 0);
+    if (row && row.xp !== safeXp) {
+      db.prepare(`
+        UPDATE users
+        SET xp=?, updated_at=?
+        WHERE guild_id=? AND user_id=?
+      `).run(safeXp, now(), gId, uId);
+    }
+    return safeXp;
+  });
+
+  return tx(guildId, userId, delta);
 }
 
 function setXp(guildId, userId, xp) {
