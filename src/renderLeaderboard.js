@@ -19,12 +19,12 @@ function renderLeaderboardPng(entries) {
     const headerH = 110;
 
     // Row block
-    const rowStep = 70;   // vertical step per row (more spacing)
+    const rowStep = 70;   // vertical step per row (spacing)
     const rowBoxH = 56;   // actual row rectangle height
     const gapAfterHeader = 22;
 
     // Extra safe space at bottom so Discord preview doesn't clip
-    const bottomPad = 48;
+    const bottomPad = 56;
 
     const height =
     padding +
@@ -46,7 +46,7 @@ function renderLeaderboardPng(entries) {
     const cyan = "#00D8FF";
     const green = "#57FF9A";
 
-    // Medal colors
+    // Trophy colors
     const gold = "#F6C453";
     const silver = "#C9D1D9";
     const bronze = "#C67C4E";
@@ -86,7 +86,11 @@ function renderLeaderboardPng(entries) {
         return s + "…";
     };
 
-    const drawMedal = (x, y, rank) => {
+    /**
+     * Draw a simple vector trophy icon (no asset needed).
+     * x,y is center.
+     */
+    const drawTrophy = (x, y, rank) => {
         let fill = null;
         if (rank === 1) fill = gold;
         else if (rank === 2) fill = silver;
@@ -94,29 +98,65 @@ function renderLeaderboardPng(entries) {
         else return;
 
         ctx.save();
-        // outer glow
-        ctx.shadowColor = fill;
-        ctx.shadowBlur = 14;
+        ctx.translate(x, y);
 
+        // glow
+        ctx.shadowColor = fill;
+        ctx.shadowBlur = 18;
+
+        // cup
         ctx.fillStyle = fill;
         ctx.beginPath();
-        ctx.arc(x, y, 16, 0, Math.PI * 2);
+        // Cup body (rounded trapezoid)
+        ctx.moveTo(-14, -14);
+        ctx.lineTo(14, -14);
+        ctx.quadraticCurveTo(16, -14, 15, -10);
+        ctx.lineTo(10, 2);
+        ctx.quadraticCurveTo(0, 10, -10, 2);
+        ctx.lineTo(-15, -10);
+        ctx.quadraticCurveTo(-16, -14, -14, -14);
+        ctx.closePath();
         ctx.fill();
 
-        // inner ring
-        ctx.shadowBlur = 0;
-        ctx.strokeStyle = "rgba(0,0,0,0.25)";
-        ctx.lineWidth = 2;
+        // handles
+        ctx.shadowBlur = 10;
         ctx.beginPath();
-        ctx.arc(x, y, 14, 0, Math.PI * 2);
-        ctx.stroke();
+        // left handle
+        ctx.moveTo(-14, -12);
+        ctx.quadraticCurveTo(-24, -10, -20, -2);
+        ctx.quadraticCurveTo(-17, 4, -11, 2);
+        ctx.quadraticCurveTo(-15, 2, -16, -2);
+        ctx.quadraticCurveTo(-19, -8, -14, -10);
+        ctx.closePath();
+        ctx.fill();
 
-        // number
+        ctx.beginPath();
+        // right handle
+        ctx.moveTo(14, -12);
+        ctx.quadraticCurveTo(24, -10, 20, -2);
+        ctx.quadraticCurveTo(17, 4, 11, 2);
+        ctx.quadraticCurveTo(15, 2, 16, -2);
+        ctx.quadraticCurveTo(19, -8, 14, -10);
+        ctx.closePath();
+        ctx.fill();
+
+        // stem
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = fill;
+        roundRect(-5, 8, 10, 8, 3);
+        ctx.fill();
+
+        // base
         ctx.fillStyle = "#0A0F1E";
-        ctx.font = "bold 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        roundRect(-16, 16, 32, 10, 4);
+        ctx.fill();
+
+        // rank number on cup
+        ctx.fillStyle = "#0A0F1E";
+        ctx.font = "900 12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(String(rank), x, y + 0.5);
+        ctx.fillText(String(rank), 0, -4);
 
         ctx.restore();
     };
@@ -184,6 +224,13 @@ function renderLeaderboardPng(entries) {
     const startY = headerY + headerH + gapAfterHeader;
     const maxXp = Math.max(1, ...top.map(e => e.xp || 0));
 
+    // Right-side text block width reservation so bars never collide
+    const rightTextPad = 22;
+    const rightTextBlockW = 140; // reserved for "2922 XP" + "Lvl 5"
+
+    // Bar placement tweak: shift LEFT by 30px and shrink width slightly
+    const barShiftLeft = 30;
+
     for (let i = 0; i < ROW_COUNT; i++) {
         const entry = top[i] || { rank: i + 1, name: "—", xp: 0, level: 0 };
         const rowX = padding;
@@ -205,9 +252,9 @@ function renderLeaderboardPng(entries) {
         const leftPad = rowX + 22;
         const midY = rowY + rowBoxH / 2;
 
-        // Medal / rank
+        // Trophy / rank
         if (entry.rank <= 3) {
-            drawMedal(leftPad + 18, midY, entry.rank);
+            drawTrophy(leftPad + 20, midY, entry.rank);
         } else {
             ctx.save();
             ctx.fillStyle = "rgba(234, 242, 255, 0.65)";
@@ -219,7 +266,7 @@ function renderLeaderboardPng(entries) {
         }
 
         // Name (truncate to fit)
-        const nameX = leftPad + 58;
+        const nameX = leftPad + 64;
         const nameMaxW = rowW * 0.46;
 
         ctx.save();
@@ -238,7 +285,7 @@ function renderLeaderboardPng(entries) {
         ctx.font = "700 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
-        ctx.fillText(xpText, rowX + rowW - 22, midY - 9);
+        ctx.fillText(xpText, rowX + rowW - rightTextPad, midY - 9);
         ctx.restore();
 
         // Level text
@@ -248,14 +295,22 @@ function renderLeaderboardPng(entries) {
         ctx.font = "600 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
-        ctx.fillText(lvlText, rowX + rowW - 22, midY + 12);
+        ctx.fillText(lvlText, rowX + rowW - rightTextPad, midY + 12);
         ctx.restore();
 
-        // XP bar
-        const barX = rowX + rowW * 0.60;
-        const barY = rowY + rowBoxH - 14;
-        const barW = rowW * 0.34;
+        // XP bar (moved left + constrained so it never overlaps right text)
         const barH = 10;
+        const barY = rowY + rowBoxH - 14;
+
+        // Left edge baseline for bars
+        const barXBase = rowX + rowW * 0.60 - barShiftLeft;
+
+        // Right edge limit is before the right text block
+        const barRightLimit = rowX + rowW - rightTextPad - rightTextBlockW;
+
+        // Bar width cannot exceed this safe area
+        const barW = Math.max(80, barRightLimit - barXBase);
+        const barX = barXBase;
 
         // track
         ctx.save();
