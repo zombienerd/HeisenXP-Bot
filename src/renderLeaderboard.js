@@ -8,15 +8,30 @@ const { createCanvas } = require("@napi-rs/canvas");
  * Returns: Buffer (PNG)
  */
 function renderLeaderboardPng(entries) {
-    const top = entries.slice(0, 10);
+    // Always Top 10, always render 10 rows to guarantee consistent height
+    const ROW_COUNT = 10;
+    const top = entries.slice(0, ROW_COUNT);
 
     // Layout
     const width = 900;
     const padding = 28;
+
     const headerH = 110;
-    const rowH = 64;
-    const rows = top.length || 10;
-    const height = headerH + rows * rowH + padding;
+
+    // Row block
+    const rowStep = 70;   // vertical step per row (more spacing)
+    const rowBoxH = 56;   // actual row rectangle height
+    const gapAfterHeader = 22;
+
+    // Extra safe space at bottom so Discord preview doesn't clip
+    const bottomPad = 48;
+
+    const height =
+    padding +
+    headerH +
+    gapAfterHeader +
+    ROW_COUNT * rowStep +
+    bottomPad;
 
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext("2d");
@@ -132,8 +147,24 @@ function renderLeaderboardPng(entries) {
     ctx.restore();
 
     // Accent lines
-    drawGlowLine(headerX + 22, headerY + headerH - 18, headerX + headerW - 22, headerY + headerH - 18, "rgba(0,216,255,0.35)", 2, 10);
-    drawGlowLine(headerX + 22, headerY + headerH - 16, headerX + headerW - 22, headerY + headerH - 16, "rgba(87,255,154,0.22)", 2, 10);
+    drawGlowLine(
+        headerX + 22,
+        headerY + headerH - 18,
+        headerX + headerW - 22,
+        headerY + headerH - 18,
+        "rgba(0,216,255,0.35)",
+                 2,
+                 10
+    );
+    drawGlowLine(
+        headerX + 22,
+        headerY + headerH - 16,
+        headerX + headerW - 22,
+        headerY + headerH - 16,
+        "rgba(87,255,154,0.22)",
+                 2,
+                 10
+    );
 
     // Title
     ctx.save();
@@ -149,19 +180,18 @@ function renderLeaderboardPng(entries) {
     ctx.fillText("Top 10 by XP • No pings • Quantum-approved", headerX + 30, headerY + 62);
     ctx.restore();
 
-    // Rows panel area (we draw each row separately)
-    const startY = headerY + headerH + 18;
-    const maxXp = Math.max(1, ...top.map(e => e.xp));
+    // Rows
+    const startY = headerY + headerH + gapAfterHeader;
+    const maxXp = Math.max(1, ...top.map(e => e.xp || 0));
 
-    for (let i = 0; i < rows; i++) {
+    for (let i = 0; i < ROW_COUNT; i++) {
         const entry = top[i] || { rank: i + 1, name: "—", xp: 0, level: 0 };
         const rowX = padding;
-        const rowY = startY + i * rowH;
+        const rowY = startY + i * rowStep;
         const rowW = width - padding * 2;
-        const rowHh = rowH - 10;
 
         // Row background
-        roundRect(rowX, rowY, rowW, rowHh, 18);
+        roundRect(rowX, rowY, rowW, rowBoxH, 18);
         ctx.fillStyle = i % 2 === 0 ? "rgba(15,26,51,0.86)" : "rgba(12,20,40,0.84)";
         ctx.fill();
 
@@ -172,10 +202,10 @@ function renderLeaderboardPng(entries) {
         ctx.stroke();
         ctx.restore();
 
-        // Medal / rank
         const leftPad = rowX + 22;
-        const midY = rowY + rowHh / 2;
+        const midY = rowY + rowBoxH / 2;
 
+        // Medal / rank
         if (entry.rank <= 3) {
             drawMedal(leftPad + 18, midY, entry.rank);
         } else {
@@ -208,7 +238,7 @@ function renderLeaderboardPng(entries) {
         ctx.font = "700 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
-        ctx.fillText(xpText, rowX + rowW - 22, midY - 10);
+        ctx.fillText(xpText, rowX + rowW - 22, midY - 9);
         ctx.restore();
 
         // Level text
@@ -221,9 +251,9 @@ function renderLeaderboardPng(entries) {
         ctx.fillText(lvlText, rowX + rowW - 22, midY + 12);
         ctx.restore();
 
-        // XP bar (relative to top XP)
+        // XP bar
         const barX = rowX + rowW * 0.60;
-        const barY = midY + 18;
+        const barY = rowY + rowBoxH - 14;
         const barW = rowW * 0.34;
         const barH = 10;
 
@@ -234,7 +264,7 @@ function renderLeaderboardPng(entries) {
         ctx.fill();
 
         // fill
-        const pct = Math.max(0, Math.min(1, entry.xp / maxXp));
+        const pct = Math.max(0, Math.min(1, (entry.xp || 0) / maxXp));
         const fillW = Math.max(0, Math.floor(barW * pct));
 
         const barGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
