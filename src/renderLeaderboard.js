@@ -5,9 +5,11 @@ const { createCanvas } = require("@napi-rs/canvas");
  * Render a leaderboard as a PNG buffer (dark theme + HeisenXP colors).
  *
  * entries: Array<{ rank: number, name: string, xp: number, level: number }>
+ * factor: number (XP curve factor, default 100). XP needed for level L is L^2 * factor.
+ *
  * Returns: Buffer (PNG)
  */
-function renderLeaderboardPng(entries) {
+function renderLeaderboardPng(entries, factor = 100) {
     // Always Top 10, always render 10 rows to guarantee consistent height
     const ROW_COUNT = 10;
     const top = entries.slice(0, ROW_COUNT);
@@ -161,6 +163,19 @@ function renderLeaderboardPng(entries) {
         ctx.restore();
     };
 
+    /**
+     * Compute progress within the current level toward next level.
+     * Uses: startXP = L^2 * factor; nextXP = (L+1)^2 * factor
+     */
+    const levelProgress = (xp, lvl) => {
+        const L = Math.max(0, Math.floor(lvl));
+        const startXP = L * L * factor;
+        const nextXP = (L + 1) * (L + 1) * factor;
+        const denom = Math.max(1, nextXP - startXP);
+        const raw = (xp - startXP) / denom;
+        return Math.max(0, Math.min(1, raw));
+    };
+
     // Background gradient
     const g = ctx.createLinearGradient(0, 0, 0, height);
     g.addColorStop(0, bg0);
@@ -222,13 +237,12 @@ function renderLeaderboardPng(entries) {
 
     // Rows
     const startY = headerY + headerH + gapAfterHeader;
-    const maxXp = Math.max(1, ...top.map(e => e.xp || 0));
 
-    // Right-side text block width reservation so bars never collide
+    // Right-side text block width reservation so bars never collide with XP/Lvl
     const rightTextPad = 22;
-    const rightTextBlockW = 140; // reserved for "2922 XP" + "Lvl 5"
+    const rightTextBlockW = 140; // reserved for "99999 XP" + "Lvl 99"
 
-    // Bar placement tweak: shift LEFT by 30px and shrink width slightly
+    // Bar placement: left-shift and constrained
     const barShiftLeft = 30;
 
     for (let i = 0; i < ROW_COUNT; i++) {
@@ -298,17 +312,13 @@ function renderLeaderboardPng(entries) {
         ctx.fillText(lvlText, rowX + rowW - rightTextPad, midY + 12);
         ctx.restore();
 
-        // XP bar (moved left + constrained so it never overlaps right text)
+        // XP bar = progress within current level toward next level
         const barH = 10;
         const barY = rowY + rowBoxH - 14;
 
-        // Left edge baseline for bars
         const barXBase = rowX + rowW * 0.60 - barShiftLeft;
-
-        // Right edge limit is before the right text block
         const barRightLimit = rowX + rowW - rightTextPad - rightTextBlockW;
 
-        // Bar width cannot exceed this safe area
         const barW = Math.max(80, barRightLimit - barXBase);
         const barX = barXBase;
 
@@ -318,8 +328,8 @@ function renderLeaderboardPng(entries) {
         ctx.fillStyle = "rgba(255,255,255,0.08)";
         ctx.fill();
 
-        // fill
-        const pct = Math.max(0, Math.min(1, (entry.xp || 0) / maxXp));
+        // fill based on progress to next level
+        const pct = levelProgress(entry.xp || 0, entry.level || 0);
         const fillW = Math.max(0, Math.floor(barW * pct));
 
         const barGrad = ctx.createLinearGradient(barX, 0, barX + barW, 0);

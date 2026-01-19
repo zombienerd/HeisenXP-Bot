@@ -158,7 +158,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return { rank: idx + 1, name, xp: r.xp, level: lvl };
     });
 
-    const png = renderLeaderboardPng(entries);
+    const png = renderLeaderboardPng(entries, settings.level_xp_factor);
     const file = new AttachmentBuilder(png, { name: "heisenxp-leaderboard.png" });
 
     await interaction.reply({
