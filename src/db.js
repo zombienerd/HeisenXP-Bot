@@ -9,6 +9,37 @@ function now() {
   return Date.now();
 }
 
+// JS-safe XP cap (prevents Infinity/precision loss in Node)
+const MAX_SAFE_XP = Number.MAX_SAFE_INTEGER; // 9,007,199,254,740,991
+
+/**
+ * Clamp any value to a safe finite integer delta (can be negative).
+ * - Non-finite -> 0
+ * - Too large magnitude -> +/- MAX_SAFE_XP
+ * - Coerces to integer
+ */
+function clampDelta(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  if (x === 0) return 0;
+  const sign = x < 0 ? -1 : 1;
+  const abs = Math.abs(x);
+  const clampedAbs = Math.min(Math.floor(abs), MAX_SAFE_XP);
+  return sign * clampedAbs;
+}
+
+/**
+ * Clamp an XP total to a safe finite integer in [0, MAX_SAFE_XP].
+ * - Non-finite -> MAX_SAFE_XP (you can change this to 0 if you prefer)
+ * - Coerces to integer
+ */
+function clampXpTotal(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return MAX_SAFE_XP;
+  if (x <= 0) return 0;
+  return Math.min(Math.floor(x), MAX_SAFE_XP);
+}
+
 /**
  * Helper: check if a table exists.
  */
@@ -133,6 +164,26 @@ CREATE TABLE IF NOT EXISTS allowed_command_channels (
     "reaction_cooldown_sec",
     "reaction_cooldown_sec INTEGER NOT NULL DEFAULT 10"
   );
+
+  // Cleanup pass: clamp any bad/overflow XP already stored (Infinity/NaN/too big/negative)
+  // Handles:
+  // - REAL inf/nan
+  // - TEXT 'Infinity'/'NaN' (if ever inserted as strings)
+  // - values > MAX_SAFE_XP
+  // - values < 0
+  //
+  // Note: SQLite compares INF > any finite number, so xp > MAX_SAFE_XP will catch REAL Infinity.
+  db.prepare(`
+  UPDATE users
+  SET xp = ?, updated_at = ?
+  WHERE xp > ?
+  OR xp < 0
+  OR xp = 'Infinity'
+  OR xp = 'inf'
+  OR xp = 'INF'
+  OR xp = 'NaN'
+  OR xp = 'nan'
+  `).run(MAX_SAFE_XP, now(), MAX_SAFE_XP);
 })();
 
 /**
@@ -191,12 +242,26 @@ function updateGuildSettings(guildId, patch) {
   const keys = Object.keys(patch).filter(k => allowed.has(k));
   if (!keys.length) return getGuildSettings(guildId);
 
+  // Optional: clamp absurd XP award values to safe deltas (prevents "quintillion per message" silliness)
+  // You can adjust these caps to whatever you prefer.
+  const MAX_XP_AWARD = 1_000_000_000; // 1 billion per event is already wildly high, but finite & safe
+  const clampAward = (v) => {
+    const x = Number(v);
+    if (!Number.isFinite(x)) return 0;
+    return Math.max(0, Math.min(Math.floor(x), MAX_XP_AWARD));
+  };
+
+  const safePatch = { ...patch };
+  if (safePatch.msg_xp !== undefined) safePatch.msg_xp = clampAward(safePatch.msg_xp);
+  if (safePatch.reaction_xp !== undefined) safePatch.reaction_xp = clampAward(safePatch.reaction_xp);
+  if (safePatch.voice_xp_per_min !== undefined) safePatch.voice_xp_per_min = clampAward(safePatch.voice_xp_per_min);
+
   const sets = keys.map(k => `${k}=@${k}`).join(", ");
   db.prepare(`
   UPDATE guild_settings
   SET ${sets}, updated_at=@updated_at
   WHERE guild_id=@guild_id
-  `).run({ guild_id: guildId, updated_at: now(), ...patch });
+  `).run({ guild_id: guildId, updated_at: now(), ...safePatch });
 
   return getGuildSettings(guildId);
 }
@@ -215,54 +280,111 @@ function ensureUser(guildId, userId) {
 
 /**
  * Atomic XP update (prevents lost updates on concurrent events).
+ * Also clamps XP to a JS-safe range to prevent Infinity/precision loss.
  * Returns the new XP.
  */
 function addXp(guildId, userId, delta) {
   ensureUser(guildId, userId);
   const t = now();
 
-  // Atomic update; clamp at 0
+  const safeDelta = clampDelta(delta);
+
+  // Atomic update; clamp to [0, MAX_SAFE_XP]
   db.prepare(`
   UPDATE users
-  SET xp = MAX(0, xp + ?),
+  SET xp = MIN(?, MAX(0, xp + ?)),
              updated_at = ?
              WHERE guild_id=? AND user_id=?
-             `).run(delta, t, guildId, userId);
+             `).run(MAX_SAFE_XP, safeDelta, t, guildId, userId);
 
-             const row = db.prepare(`SELECT xp FROM users WHERE guild_id=? AND user_id=?`).get(guildId, userId);
-             return row?.xp ?? 0;
+             const row = db
+             .prepare(`SELECT xp FROM users WHERE guild_id=? AND user_id=?`)
+             .get(guildId, userId);
+
+             const safeXp = clampXpTotal(row?.xp ?? 0);
+
+             // If DB had something odd (legacy Infinity etc.), normalize it
+             if (row && row.xp !== safeXp) {
+               db.prepare(`
+               UPDATE users
+               SET xp=?, updated_at=?
+               WHERE guild_id=? AND user_id=?
+               `).run(safeXp, now(), guildId, userId);
+             }
+
+             return safeXp;
 }
 
 function setXp(guildId, userId, xp) {
   ensureUser(guildId, userId);
+  const safe = clampXpTotal(xp);
+
   db.prepare(`
   UPDATE users
   SET xp=?, updated_at=?
   WHERE guild_id=? AND user_id=?
-  `).run(Math.max(0, Math.floor(xp)), now(), guildId, userId);
+  `).run(safe, now(), guildId, userId);
 }
 
 function getXp(guildId, userId) {
   const row = db.prepare(`SELECT xp FROM users WHERE guild_id=? AND user_id=?`).get(guildId, userId);
-  return row?.xp ?? 0;
+  const safe = clampXpTotal(row?.xp ?? 0);
+
+  // Normalize legacy bad values on read
+  if (row && row.xp !== safe) {
+    db.prepare(`
+    UPDATE users
+    SET xp=?, updated_at=?
+    WHERE guild_id=? AND user_id=?
+    `).run(safe, now(), guildId, userId);
+  }
+
+  return safe;
 }
 
 function topUsers(guildId, limit = 10) {
-  return db.prepare(`
+  const rows = db.prepare(`
   SELECT user_id, xp
   FROM users
   WHERE guild_id=?
   ORDER BY xp DESC
   LIMIT ?
   `).all(guildId, limit);
+
+  // Sanitize results (and normalize DB if needed)
+  let changed = false;
+  const out = rows.map(r => {
+    const safe = clampXpTotal(r.xp);
+    if (r.xp !== safe) changed = true;
+    return { user_id: r.user_id, xp: safe };
+  });
+
+  if (changed) {
+    const t = now();
+    const stmt = db.prepare(`
+    UPDATE users
+    SET xp=?, updated_at=?
+    WHERE guild_id=? AND user_id=?
+    `);
+    const tx = db.transaction(() => {
+      for (const r of out) {
+        stmt.run(r.xp, t, guildId, r.user_id);
+      }
+    });
+    tx();
+  }
+
+  return out;
 }
 
 function allUsersInGuild(guildId) {
-  return db.prepare(`
+  const rows = db.prepare(`
   SELECT user_id, xp
   FROM users
   WHERE guild_id=?
   `).all(guildId);
+
+  return rows.map(r => ({ user_id: r.user_id, xp: clampXpTotal(r.xp) }));
 }
 
 /**
@@ -388,6 +510,9 @@ function listAllowedCommandChannels(guildId) {
 module.exports = {
   db,
   now,
+
+  // caps/helpers (exported in case you want to show warnings)
+  MAX_SAFE_XP,
 
   // guild settings
   getGuildSettings,
