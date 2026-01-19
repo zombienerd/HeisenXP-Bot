@@ -65,6 +65,24 @@ Admin/mod commands (requires **Manage Guild** by default):
 - `/setcommandchannel list`
 - `/settings` (shows current guild settings, role mappings, allowed channels)
 
+## Database Backup
+
+The bot stores all data in `xpbot.sqlite`. Regular backups are recommended:
+```bash
+# Manual backup
+cp xpbot.sqlite xpbot.sqlite.backup
+
+# Automated daily backup (cron)
+0 0 * * * cp /path/to/xpbot.sqlite /backups/xpbot-$(date +\%Y\%m\%d).sqlite
+```
+
+To restore from backup:
+```bash
+# Stop the bot first
+cp xpbot.sqlite.backup xpbot.sqlite
+# Restart the bot
+```
+
 ## Notes
 
 - Bot must have **Manage Roles** permission and its highest role must be **above** roles it manages.
