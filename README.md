@@ -76,4 +76,4 @@ Admin/mod commands (requires **Manage Guild** by default):
 - Create Bot & Token from Discord Developer Portal.  Both must have the following permissions:
 ![Bot Permissions](https://github.com/zombienerd/HeisenXP-Bot/blob/main/bot_settings.png "Bot Permissions")
 
-Disclaimer: GPT 5.2 was used for debugging and assisting with creation of the leaderboard extents.
+Disclaimer: GPT 5.2 was used for debugging and assisting with creation of the leaderboard extents. Bot logo was AI generated.
