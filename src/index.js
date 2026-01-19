@@ -153,18 +153,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const rows = topUsers(guildId, limit);
     if (!rows.length) {
-      await interaction.reply({ content: "No leaderboard data yet.", ephemeral: true });
+      await interaction.reply({
+        content: "No leaderboard data yet.",
+        flags: MessageFlags.Ephemeral,
+      });
       return;
     }
 
+    // Fetch members once to avoid repeated API calls
+    const members = await interaction.guild.members.fetch({ user: rows.map(r => r.user_id) });
+
     const lines = rows.map((r, idx) => {
+      const member = members.get(r.user_id);
+      const name =
+      member?.displayName ||
+      member?.user?.username ||
+      `User ${r.user_id}`;
+
       const lvl = levelFromXp(r.xp, settings.level_xp_factor);
-      return `${idx + 1}. <@${r.user_id}> — **${r.xp} XP** (Lvl ${lvl})`;
+      return `${idx + 1}. **${name}** — ${r.xp} XP (Lvl ${lvl})`;
     });
 
     await interaction.reply({
-      content: `**Leaderboard (Top ${limit})**\n` + lines.join("\n"),
+      content: `**Leaderboard (Top ${limit})**\n${lines.join("\n")}`,
     });
+
     return;
   }
 
