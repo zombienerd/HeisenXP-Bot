@@ -217,7 +217,7 @@ function renderLeaderboardPng(entries) {
     // Subtitle
     ctx.fillStyle = subtext;
     ctx.font = "500 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
-    ctx.fillText("Top 10 by XP • No pings • Quantum-approved", headerX + 30, headerY + 62);
+    ctx.fillText("Top 10 by XP • Quantum-approved", headerX + 30, headerY + 62);
     ctx.restore();
 
     // Rows

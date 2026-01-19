@@ -134,7 +134,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // ---------------- Public leaderboard image (Top 10 only) ----------------
   if (interaction.commandName === "leaderboard") {
-    // Always top 10 per your requirement
+    // Always top 10
     const rows = topUsers(guildId, 10);
 
     if (!rows.length) {
@@ -162,7 +162,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const file = new AttachmentBuilder(png, { name: "heisenxp-leaderboard.png" });
 
     await interaction.reply({
-      content: "**Leaderboard (Top 10)**",
+      content: "**Leaderboard:**",
                             files: [file],
     });
     return;
