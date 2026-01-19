@@ -1,6 +1,8 @@
 # Heisen-XP Bot (discord.js v14)
 # MIT LICENSE
 
+![HeisenXP Bot Logo](https://github.com/zombienerd/HeisenXP-Bot/blob/main/logo.png "HeisenXP Bot Logo")
+
 Per-guild configurable XP/level bot that tracks:
 - **Messages**
 - **Reactions**
@@ -71,5 +73,7 @@ Admin/mod commands (requires **Manage Guild** by default):
   - and in a voice channel with **at least 2 eligible human users**
 - SQLite DB file (`xpbot.sqlite`) is created automatically in the project root.
 - Roles for auto-granting must be BELOW the bot's role in the discord server's role settings (Drag bot's role above the desired roles to grant)
+- Create Bot & Token from Discord Developer Portal.  Both must have the following permissions:
+![Bot Permissions](https://github.com/zombienerd/HeisenXP-Bot/blob/main/bot_settings.png "Bot Permissions")
 
 Disclaimer: GPT 5.2 was used for debugging and assisting with creation of the leaderboard extents.
