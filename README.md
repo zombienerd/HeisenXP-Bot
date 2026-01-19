@@ -1,8 +1,6 @@
 # Heisen-XP Bot (discord.js v14)
 # MIT LICENSE
 
-![HeisenXP Bot Logo](https://github.com/zombienerd/HeisenXP-Bot/blob/main/logo.png "HeisenXP Bot Logo")
-
 Per-guild configurable XP/level bot that tracks:
 - **Messages**
 - **Reactions**
