@@ -15,6 +15,8 @@ Includes:
 
 ## Setup
 
+Requirements: Node.js, Discord.js 14+ (13.x will not work)
+
 1) Install dependencies
 ```bash
 npm install
@@ -48,7 +50,7 @@ npm start
 
 User commands:
 - `/xp [user]`
-- `/leaderboard [limit]`
+- `/leaderboard`
 
 Admin/mod commands (requires **Manage Guild** by default):
 - `/setxp message:<int> reaction:<int> voice:<int> msgcooldown:<int> reactioncooldown:<int>`
@@ -68,3 +70,6 @@ Admin/mod commands (requires **Manage Guild** by default):
   - not muted/deafened (self or server)
   - and in a voice channel with **at least 2 eligible human users**
 - SQLite DB file (`xpbot.sqlite`) is created automatically in the project root.
+- Roles for auto-granting must be BELOW the bot's role in the discord server's role settings (Drag bot's role above the desired roles to grant)
+
+Disclaimer: GPT 5.2 was used for debugging and assisting with creation of the leaderboard extents.
