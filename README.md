@@ -45,7 +45,7 @@ npm start
 
 - Enable the **Message Content Intent** if you want `messageCreate` to fire reliably for all message events.
   - Without it, the bot may not receive message content and (depending on gateway/intents configuration) may not receive message events as expected.
-- Create Bot & Token from Discord Developer Portal.  Both must have the following permissions:
+- Create Bot & Token from Discord Developer Portal.  Bot must have the following permissions:
 ![Bot Permissions](https://github.com/zombienerd/HeisenXP-Bot/blob/main/bot_settings.png "Bot Permissions")
 
 ## Commands
