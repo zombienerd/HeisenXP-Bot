@@ -10,6 +10,7 @@ const FONT_STACK = [
   '"Noto Sans"',
   '"Noto Sans Symbols2"',
   '"Noto Sans Symbols"',
+  '"Noto Sans Math"',
   '"DejaVu Sans"',
   '"Segoe UI Symbol"',
   '"Apple Color Emoji"',
