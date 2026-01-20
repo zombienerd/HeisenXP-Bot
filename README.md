@@ -90,6 +90,7 @@ cp xpbot.sqlite.backup xpbot.sqlite
   - not muted/deafened (self or server)
   - and in a voice channel with **at least 2 eligible human users**
 - SQLite DB file (`xpbot.sqlite`) is created automatically in the project root.
+- Ensure you have a font installed that handles symbols and emoji. (sudo apt install fonts-noto fonts-dejavu-core fonts-noto-color-emoji)
 - Roles for auto-granting must be BELOW the bot's role in the discord server's role settings (Drag bot's role above the desired roles to grant)
 
 

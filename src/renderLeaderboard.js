@@ -1,6 +1,42 @@
 // src/renderLeaderboard.js
 const { createCanvas } = require("@napi-rs/canvas");
 
+// Font stack with broad Unicode coverage (install at least one of these on the host):
+// - fonts-noto (Noto Sans + Symbols)
+// - fonts-dejavu
+// - (optional) fonts-noto-color-emoji
+// This prevents "tofu" (\u25A1) blocks for nicknames containing uncommon Unicode.
+const FONT_STACK = [
+  '"Noto Sans"',
+  '"Noto Sans Symbols2"',
+  '"Noto Sans Symbols"',
+  '"DejaVu Sans"',
+  '"Segoe UI Symbol"',
+  '"Apple Color Emoji"',
+  '"Noto Color Emoji"',
+  '"Twemoji Mozilla"',
+  'system-ui',
+  '-apple-system',
+  '"Segoe UI"',
+  'Roboto',
+  'Arial',
+  'sans-serif',
+].join(", ");
+
+function sanitizeDisplayName(name) {
+  const raw = String(name ?? "");
+  // Remove control chars + bidi controls that can break rendering or spoof text.
+  // Also collapse whitespace/newlines.
+  const cleaned = raw
+    .normalize("NFC")
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, "")
+    .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return cleaned.length ? cleaned : "—";
+}
+
 /**
  * Render a leaderboard as a PNG buffer (dark theme + HeisenXP colors).
  *
@@ -79,13 +115,23 @@ function renderLeaderboardPng(entries, factor = 100) {
     };
 
     const measureFitText = (str, maxW, font) => {
+        const input = sanitizeDisplayName(str);
         ctx.font = font;
-        if (ctx.measureText(str).width <= maxW) return str;
-        let s = str;
-        while (s.length > 1 && ctx.measureText(s + "…").width > maxW) {
-            s = s.slice(0, -1);
+        if (ctx.measureText(input).width <= maxW) return input;
+
+        // Split by Unicode codepoints so we don't chop surrogate pairs (emoji, some symbols)
+        const cps = Array.from(input);
+        let hi = cps.length;
+        // Fast-ish: binary search the max prefix that fits
+        let lo = 0;
+        while (lo < hi) {
+            const mid = Math.ceil((lo + hi) / 2);
+            const candidate = cps.slice(0, mid).join("") + "…";
+            if (ctx.measureText(candidate).width <= maxW) lo = mid;
+            else hi = mid - 1;
         }
-        return s + "…";
+        const prefixLen = Math.max(1, lo);
+        return cps.slice(0, prefixLen).join("") + "…";
     };
 
     /**
@@ -155,7 +201,7 @@ function renderLeaderboardPng(entries, factor = 100) {
 
         // rank number on cup
         ctx.fillStyle = "#0A0F1E";
-        ctx.font = "900 12px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.font = `900 12px ${FONT_STACK}`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(String(rank), 0, -4);
@@ -224,14 +270,14 @@ function renderLeaderboardPng(entries, factor = 100) {
     // Title
     ctx.save();
     ctx.fillStyle = text;
-    ctx.font = "800 34px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.font = `800 34px ${FONT_STACK}`;
     ctx.textBaseline = "top";
     ctx.textAlign = "left";
     ctx.fillText("HeisenXP Leaderboard", headerX + 28, headerY + 22);
 
     // Subtitle
     ctx.fillStyle = subtext;
-    ctx.font = "500 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.font = `500 16px ${FONT_STACK}`;
     ctx.fillText("Top 10 by XP • Quantum-approved", headerX + 30, headerY + 62);
     ctx.restore();
 
@@ -272,7 +318,7 @@ function renderLeaderboardPng(entries, factor = 100) {
         } else {
             ctx.save();
             ctx.fillStyle = "rgba(234, 242, 255, 0.65)";
-            ctx.font = "700 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+            ctx.font = `700 16px ${FONT_STACK}`;
             ctx.textAlign = "left";
             ctx.textBaseline = "middle";
             ctx.fillText(`${entry.rank}.`, leftPad + 8, midY);
@@ -285,10 +331,10 @@ function renderLeaderboardPng(entries, factor = 100) {
 
         ctx.save();
         ctx.fillStyle = text;
-        ctx.font = "800 18px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.font = `800 18px ${FONT_STACK}`;
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        const safeName = measureFitText(String(entry.name ?? "—"), nameMaxW, ctx.font);
+        const safeName = measureFitText(sanitizeDisplayName(entry.name), nameMaxW, ctx.font);
         ctx.fillText(safeName, nameX, midY);
         ctx.restore();
 
@@ -296,7 +342,7 @@ function renderLeaderboardPng(entries, factor = 100) {
         const xpText = `${entry.xp} XP`;
         ctx.save();
         ctx.fillStyle = "rgba(234, 242, 255, 0.86)";
-        ctx.font = "700 16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.font = `700 16px ${FONT_STACK}`;
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
         ctx.fillText(xpText, rowX + rowW - rightTextPad, midY - 9);
@@ -306,7 +352,7 @@ function renderLeaderboardPng(entries, factor = 100) {
         const lvlText = `Lvl ${entry.level}`;
         ctx.save();
         ctx.fillStyle = "rgba(234, 242, 255, 0.70)";
-        ctx.font = "600 14px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+        ctx.font = `600 14px ${FONT_STACK}`;
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
         ctx.fillText(lvlText, rowX + rowW - rightTextPad, midY + 12);
